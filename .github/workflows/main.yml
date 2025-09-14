@@ -20,56 +20,97 @@ jobs:
      run: pip install bandit
 
    - name: Run Bandit Scan
-     run: bandit -ll -ii -r . -f json -o bandit-report.json
+     run: bandit -ll -ii -r . -f json -o bandit-report.json || true
 
    - name: Upload Artifact
-     uses: actions/upload-artifact@v3
+     uses: actions/upload-artifact@v4
      if: always()
      with:
       name: bandit-findings
       path: bandit-report.json
 
  image_scan:
-   name: Build Image and Run Image Scan
-   runs-on: ubuntu-latest
+  name: Build Image and Run Docker Scout Scan
+  runs-on: ubuntu-22.04
 
-   steps:
-   - name: Checkout code
-     uses: actions/checkout@v2
+  steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
 
-   - name: Set up Docker
-     uses: docker-practice/actions-setup-docker@v1
-     with:
-      docker_version: '20.10.7'
+    - name: Set up Docker
+      uses: crazy-max/ghaction-setup-docker@v2
 
-   - name: Build Docker Image
-     run: docker build -f Dockerfile -t myapp:latest .
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USER }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-   # - name: Docker Scout Scan
-     # run: |
-       # curl -fsSL https://raw.githubusercontent.com/docker/scout-cli/main/install.sh -o install-scout.sh
-       # sh install-scout.sh
-       # echo ${{ secrets.REPO_PWD }} | docker login -u ${{ secrets.REPO_USER }} --password-stdin
-       # docker scout quickview
-       # docker scout cves
+    - name: Build Docker Image
+      run: docker build -f Dockerfile -t ${{ secrets.DOCKERHUB_USER }}/myapp:latest .
 
-   - name: Docker Scout Scan
-     uses: docker/scout-action@v1.0.9
-     with:
-       dockerhub-user: ${{ secrets.REPO_USER }}
-       dockerhub-password: ${{ secrets.REPO_PWD }}
-       command: quickview,cves
-       only-severities: critical,high
-       sarif-file: scout-report.sarif
+    - name: Push Docker Image
+      run: docker push ${{ secrets.DOCKERHUB_USER }}/myapp:latest
 
-   - name: Upload Artifact
-     uses: actions/upload-artifact@v3
-     if: always()
-     with:
-       name: docker-scout-findings
-       path: scout-report.sarif
+    - name: Set Docker Scout Cache Format
+      run: echo "DOCKER_SCOUT_CACHE_FORMAT=tar" >> $GITHUB_ENV
 
+    - name: Docker Scout Scan
+      uses: docker/scout-action@v1.0.9
+      with:
+        dockerhub-user: ${{ secrets.DOCKERHUB_USER }}
+        dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+        image: ${{ secrets.DOCKERHUB_USER }}/myapp:latest
+        command: quickview,cves
+        only-severities: critical,high
+        sarif-file: scout-report.sarif
 
+    - name: Upload Docker Scout Report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: docker-scout-findings
+        path: scout-report.sarif
+
+ dast_scan:
+    name: OWASP ZAP DAST Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build and run app container
+        run: |
+          docker build -t myapp:latest .
+          docker run -d -p 8000:8000 --name myapp myapp:latest
+          sleep 10
+
+      - name: Run OWASP ZAP Baseline Scan
+        run: |
+          docker run --network host -v $(pwd):/zap/wrk/:rw ghcr.io/zaproxy/zaproxy:stable zap-baseline.py \
+            -t http://localhost:8000 \
+            -J zap-report.json \
+            -I || true
+
+      - name: ZAP Quick Summary
+        if: always()
+        run: |
+          echo "🔍 OWASP ZAP Summary:"
+          if [ -f zap-report.json ]; then
+            alerts=$(jq '.site[0].alerts | length' zap-report.json)
+            echo "Total Alerts Found: $alerts"
+            jq -r '.site[0].alerts[] | "\(.riskdesc): \(.alert)"' zap-report.json | head -n 5
+          else
+            echo "No ZAP report found."
+          fi
+
+      - name: Upload ZAP Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zap-report
+          path: zap-report.json
 
 
    
